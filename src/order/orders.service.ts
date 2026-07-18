@@ -230,11 +230,13 @@ export class OrdersService {
       user: userId,
     });
 
+    
+
     this.emitOrderUpdated(order);
 
-    this.sendNormalOrderConfirmation(order).catch((error) => {
+    this.sendOrderConfirmationWithInvoice(order).catch((error) => {
       console.error(
-        'Order confirmation WhatsApp failed:',
+        'Order confirmation with invoice WhatsApp failed:',
         error?.message || error,
       );
     });
