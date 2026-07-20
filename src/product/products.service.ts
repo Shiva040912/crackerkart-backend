@@ -29,7 +29,21 @@ export class ProductsService {
   ) {}
 
   async create(createProductDto: CreateProductDto) {
-    const product = await this.productModel.create(createProductDto);
+    const lastProduct = await this.productModel
+      .findOne()
+      .sort({
+        displayOrder: -1,
+      })
+      .select('displayOrder');
+
+    const nextDisplayOrder = lastProduct
+      ? Number(lastProduct.displayOrder || 0) + 1
+      : 1;
+
+    const product = await this.productModel.create({
+      ...createProductDto,
+      displayOrder: nextDisplayOrder,
+    });
 
     this.socketGateway.server.emit('productUpdated');
 
@@ -43,7 +57,10 @@ export class ProductsService {
     return this.productModel
       .find()
       .populate('category')
-      .sort({ createdAt: -1 });
+      .sort({
+        displayOrder: 1,
+        createdAt: 1,
+      });
   }
 
   async findActive(query?: any) {
@@ -86,11 +103,16 @@ export class ProductsService {
     return this.productModel
       .find(filter)
       .populate('category')
-      .sort({ createdAt: -1 });
+      .sort({
+        displayOrder: 1,
+        createdAt: 1,
+      });
   }
 
   async findOne(id: string) {
-    const product = await this.productModel.findById(id).populate('category');
+    const product = await this.productModel
+      .findById(id)
+      .populate('category');
 
     if (!product) {
       throw new NotFoundException('Product not found');
@@ -127,6 +149,8 @@ export class ProductsService {
       throw new NotFoundException('Product not found');
     }
 
+    await this.normalizeGlobalDisplayOrder();
+
     this.socketGateway.server.emit('productUpdated');
 
     return {
@@ -140,6 +164,147 @@ export class ProductsService {
     });
 
     return brands.sort();
+  }
+
+  async reorder(categoryId: string | undefined, productIds: string[]) {
+    if (!Array.isArray(productIds) || productIds.length === 0) {
+      throw new BadRequestException('Product IDs are required');
+    }
+
+    const uniqueProductIds = [...new Set(productIds)];
+
+    if (uniqueProductIds.length !== productIds.length) {
+      throw new BadRequestException('Duplicate product IDs are not allowed');
+    }
+
+    await this.normalizeGlobalDisplayOrder();
+
+    /*
+     * ALL PRODUCTS REORDER
+     *
+     * categoryId empty / undefined / "all" na
+     * complete global product order update aagum.
+     */
+    if (!categoryId || categoryId === 'all') {
+      const allProducts = await this.productModel
+        .find()
+        .select('_id')
+        .sort({
+          displayOrder: 1,
+          createdAt: 1,
+        });
+
+      if (allProducts.length !== productIds.length) {
+        throw new BadRequestException(
+          'All products must be included while changing global order',
+        );
+      }
+
+      const existingProductIds = new Set(
+        allProducts.map((product) => product._id.toString()),
+      );
+
+      const invalidProduct = productIds.find(
+        (productId) => !existingProductIds.has(productId),
+      );
+
+      if (invalidProduct) {
+        throw new BadRequestException(
+          'One or more product IDs are invalid',
+        );
+      }
+
+      const operations = productIds.map((productId, index) => ({
+        updateOne: {
+          filter: {
+            _id: productId,
+          },
+          update: {
+            $set: {
+              displayOrder: index + 1,
+            },
+          },
+        },
+      }));
+
+      await this.productModel.bulkWrite(operations);
+
+      this.socketGateway.server.emit('productUpdated');
+
+      return {
+        message: 'Global product order updated successfully',
+      };
+    }
+
+    /*
+     * CATEGORY PRODUCTS REORDER
+     *
+     * Category products existing global positions mattum eduthutu,
+     * andha positions-kulla reordered products assign pannum.
+     *
+     * Idhunaala All Products global order break aagadhu.
+     */
+    const category = await this.categoryModel.findById(categoryId);
+
+    if (!category) {
+      throw new NotFoundException('Category not found');
+    }
+
+    const categoryProducts = await this.productModel
+      .find({
+        category: categoryId,
+      })
+      .select('_id displayOrder')
+      .sort({
+        displayOrder: 1,
+        createdAt: 1,
+      });
+
+    if (categoryProducts.length !== productIds.length) {
+      throw new BadRequestException(
+        'All products from the selected category must be included',
+      );
+    }
+
+    const categoryProductIds = new Set(
+      categoryProducts.map((product) => product._id.toString()),
+    );
+
+    const invalidCategoryProduct = productIds.find(
+      (productId) => !categoryProductIds.has(productId),
+    );
+
+    if (invalidCategoryProduct) {
+      throw new BadRequestException(
+        'Some products do not belong to the selected category',
+      );
+    }
+
+    const globalPositions = categoryProducts.map(
+      (product) => product.displayOrder,
+    );
+
+    const operations = productIds.map((productId, index) => ({
+      updateOne: {
+        filter: {
+          _id: productId,
+          category: categoryId,
+        },
+        update: {
+          $set: {
+            displayOrder: globalPositions[index],
+          },
+        },
+      },
+    }));
+
+    await this.productModel.bulkWrite(operations);
+
+    this.socketGateway.server.emit('productUpdated');
+
+    return {
+      message: 'Category product order updated successfully',
+    };
   }
 
   downloadBulkUploadTemplate(res: any) {
@@ -196,7 +361,9 @@ export class ProductsService {
     const sheetName = workbook.SheetNames[0];
 
     if (!sheetName) {
-      throw new BadRequestException('Excel file does not contain a sheet');
+      throw new BadRequestException(
+        'Excel file does not contain a sheet',
+      );
     }
 
     const sheet = workbook.Sheets[sheetName];
@@ -206,16 +373,34 @@ export class ProductsService {
     });
 
     if (!rows.length) {
-      throw new BadRequestException('Excel file does not contain product data');
+      throw new BadRequestException(
+        'Excel file does not contain product data',
+      );
     }
 
     const products: any[] = [];
+
+    const lastProduct = await this.productModel
+      .findOne()
+      .sort({
+        displayOrder: -1,
+      })
+      .select('displayOrder');
+
+    let nextDisplayOrder = lastProduct
+      ? Number(lastProduct.displayOrder || 0) + 1
+      : 1;
 
     for (let index = 0; index < rows.length; index++) {
       const row = rows[index];
       const rowNumber = index + 2;
 
-      if (!row.name || row.price === '' || row.stock === '' || !row.category) {
+      if (
+        !row.name ||
+        row.price === '' ||
+        row.stock === '' ||
+        !row.category
+      ) {
         throw new BadRequestException(
           `Required data missing in row ${rowNumber}`,
         );
@@ -269,7 +454,9 @@ export class ProductsService {
 
       const price = Number(row.price);
       const stock = Number(row.stock);
-      const originalPrice = Number(row.originalPrice || row.price);
+      const originalPrice = Number(
+        row.originalPrice || row.price,
+      );
 
       if (
         Number.isNaN(price) ||
@@ -299,18 +486,27 @@ export class ProductsService {
 
         category: category._id,
 
-        isActive: String(row.isActive).trim().toLowerCase() !== 'false',
+        displayOrder: nextDisplayOrder,
 
-        isBestSeller: String(row.isBestSeller).trim().toLowerCase() === 'true',
+        isActive:
+          String(row.isActive).trim().toLowerCase() !== 'false',
 
-        isNewArrival: String(row.isNewArrival).trim().toLowerCase() === 'true',
+        isBestSeller:
+          String(row.isBestSeller).trim().toLowerCase() === 'true',
+
+        isNewArrival:
+          String(row.isNewArrival).trim().toLowerCase() === 'true',
 
         isFestivalSpecial:
-          String(row.isFestivalSpecial).trim().toLowerCase() === 'true',
+          String(row.isFestivalSpecial).trim().toLowerCase() ===
+          'true',
       });
+
+      nextDisplayOrder++;
     }
 
-    const createdProducts = await this.productModel.insertMany(products);
+    const createdProducts =
+      await this.productModel.insertMany(products);
 
     this.socketGateway.server.emit('productUpdated');
 
@@ -338,7 +534,11 @@ export class ProductsService {
 
     const workbook = XLSX.utils.book_new();
 
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Stock Update');
+    XLSX.utils.book_append_sheet(
+      workbook,
+      worksheet,
+      'Stock Update',
+    );
 
     const excelBuffer = XLSX.write(workbook, {
       bookType: 'xlsx',
@@ -360,7 +560,9 @@ export class ProductsService {
 
   async bulkStockUpdate(file: any) {
     if (!file) {
-      throw new BadRequestException('Excel or CSV file is required');
+      throw new BadRequestException(
+        'Excel or CSV file is required',
+      );
     }
 
     const workbook = XLSX.read(file.buffer, {
@@ -370,7 +572,9 @@ export class ProductsService {
     const sheetName = workbook.SheetNames[0];
 
     if (!sheetName) {
-      throw new BadRequestException('Excel file does not contain a sheet');
+      throw new BadRequestException(
+        'Excel file does not contain a sheet',
+      );
     }
 
     const sheet = workbook.Sheets[sheetName];
@@ -380,7 +584,9 @@ export class ProductsService {
     });
 
     if (!rows.length) {
-      throw new BadRequestException('Excel file does not contain stock data');
+      throw new BadRequestException(
+        'Excel file does not contain stock data',
+      );
     }
 
     let updatedCount = 0;
@@ -444,6 +650,44 @@ export class ProductsService {
       message: 'Bulk stock updated successfully',
       totalUpdated: updatedCount,
     };
+  }
+
+  private async normalizeGlobalDisplayOrder() {
+    const products = await this.productModel
+      .find()
+      .select('_id displayOrder')
+      .sort({
+        displayOrder: 1,
+        createdAt: 1,
+      });
+
+    if (!products.length) {
+      return;
+    }
+
+    const needsNormalization = products.some(
+      (product, index) =>
+        Number(product.displayOrder || 0) !== index + 1,
+    );
+
+    if (!needsNormalization) {
+      return;
+    }
+
+    const operations = products.map((product, index) => ({
+      updateOne: {
+        filter: {
+          _id: product._id,
+        },
+        update: {
+          $set: {
+            displayOrder: index + 1,
+          },
+        },
+      },
+    }));
+
+    await this.productModel.bulkWrite(operations);
   }
 
   private escapeRegex(value: string) {

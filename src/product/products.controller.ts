@@ -9,8 +9,9 @@ import {
   Query,
   UseGuards,
   Res,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
-import { UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 
@@ -31,8 +32,8 @@ export class ProductsController {
     return this.productsService.create(createProductDto);
   }
 
-  @UseGuards(JwtAuthGuard, AdminGuard)
   @Post('bulk-upload')
+  @UseGuards(JwtAuthGuard, AdminGuard)
   @UseInterceptors(FileInterceptor('file'))
   bulkUpload(@UploadedFile() file: any) {
     return this.productsService.bulkUpload(file);
@@ -43,6 +44,21 @@ export class ProductsController {
   @UseInterceptors(FileInterceptor('file'))
   bulkStockUpdate(@UploadedFile() file: any) {
     return this.productsService.bulkStockUpdate(file);
+  }
+
+  @Patch('reorder')
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  reorder(
+    @Body()
+    body: {
+      categoryId: string;
+      productIds: string[];
+    },
+  ) {
+    return this.productsService.reorder(
+      body.categoryId,
+      body.productIds,
+    );
   }
 
   @Get()
@@ -60,21 +76,23 @@ export class ProductsController {
     return this.productsService.getBrands();
   }
 
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.productsService.findOne(id);
-  }
-
   @Get('bulk-upload/template')
   @UseGuards(JwtAuthGuard, AdminGuard)
   downloadBulkUploadTemplate(@Res() res: Response) {
     return this.productsService.downloadBulkUploadTemplate(res);
   }
-  
+
+  @Get(':id')
+  findOne(@Param('id') id: string) {
+    return this.productsService.findOne(id);
+  }
 
   @Patch(':id')
   @UseGuards(JwtAuthGuard, AdminGuard)
-  update(@Param('id') id: string, @Body() updateProductDto: UpdateProductDto) {
+  update(
+    @Param('id') id: string,
+    @Body() updateProductDto: UpdateProductDto,
+  ) {
     return this.productsService.update(id, updateProductDto);
   }
 

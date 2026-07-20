@@ -53,6 +53,9 @@ export class Product {
   @Prop({ default: 0 })
   discount!: number;
 
+  @Prop({ default: 0, index: true })
+  displayOrder!: number;
+
   @Prop({ default: true })
   isActive!: boolean;
 }
